@@ -21,7 +21,12 @@ $Programmes = $paths | ForEach-Object {
         $InstallDate = $Key.GetValue("InstallDate")
         if ($InstallDate -and $InstallDate -match '^\d{8}$') {
             # Le format est souvent YYYYMMDD
-            $InstallDate = [datetime]::ParseExact($InstallDate, 'yyyyMMdd', $null)
+            # Utilisation de la méthode TryParseExact pour plus de robustesse
+            if ([datetime]::TryParseExact($InstallDate, 'yyyyMMdd', $null, [System.Globalization.DateTimeStyles]::None, [ref]$DateObj)) {
+                $InstallDate = $DateObj
+            } else {
+                $InstallDate = [datetime]::MinValue
+            }
         } else {
             $InstallDate = [datetime]::MinValue
         }
@@ -71,22 +76,32 @@ function DessinerMenu {
     Write-Host "Utilisez les flèches pour naviguer. `e[1mP`e[0m = Ouvrir le Chemin. `e[1mQ`e[0m = Quitter."
     Write-Host "--------------------------------------"
     
-    # Définition des propriétés à afficher pour Format-Table
-    $PropsAfficher = "Nom", "Version", @{Name="Taille (Mo)"; Expression={$_.TailleMo -as [string]}}, @{Name="Date d'Install."; Expression={$_.DateInstallation -ne [datetime]::MinValue ? $_.DateInstallation.ToString("yyyy-MM-dd") : "N/A"}}
+    # Affichage de l'en-tête (manuellement pour l'alignement)
+    $HeaderNom = "Nom du Programme".PadRight(50)
+    $HeaderVersion = "Version".PadRight(15)
+    $HeaderTaille = "Taille (Mo)".PadRight(10)
+    $HeaderDate = "Date d'Install.".PadRight(15)
+    Write-Host "$HeaderNom $HeaderVersion $HeaderTaille $HeaderDate"
 
     # Affichage de la liste des programmes
     for ($i = 0; $i -lt $ListeProgrammes.Count; $i++) {
         $LigneProgramme = $ListeProgrammes[$i]
         
-        # Format-Table n'est pas idéal pour le surlignage ligne par ligne. 
-        # On formate manuellement les colonnes pour un alignement acceptable.
-        
+        # Formatage des colonnes avec PadRight pour alignement
         $Nom = ($LigneProgramme.Nom).PadRight(50)
         $Version = ($LigneProgramme.Version).PadRight(15)
         $Taille = ($LigneProgramme.TailleMo -as [string]).PadRight(10)
-        $Date = if ($LigneProgramme.DateInstallation -ne [datetime]::MinValue) { 
-            $LigneProgramme.DateInstallation.ToString("yyyy-MM-dd") 
-        } else { "N/A" }
+        
+        # --- CORRECTION DE L'ERREUR DE SURCHARGE ICI ---
+        # 1. On vérifie d'abord si la date n'est pas la valeur minimale (ce qui signifie N/A)
+        if ($LigneProgramme.DateInstallation -ne [datetime]::MinValue) { 
+            # 2. On caste la valeur en [datetime] pour s'assurer que la méthode ToString(string) est disponible
+            $Date = ([datetime]$LigneProgramme.DateInstallation).ToString("yyyy-MM-dd") 
+        } else { 
+            $Date = "N/A" 
+        }
+        # ------------------------------------------------
+        
         $Date = $Date.PadRight(15)
 
         $LigneAfficher = "$Nom $Version $Taille $Date"
