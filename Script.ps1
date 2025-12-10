@@ -1,37 +1,26 @@
-﻿# Définition des chemins du Registre où les programmes sont listés
+﻿# --- 1. Récupération des données (Robuste) ---
 $paths = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall",
          "HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
 
-# --- 1. Récupération des données des programmes ---
+Write-Host "Chargement des programmes..." -ForegroundColor Cyan
+
 $Programmes = $paths | ForEach-Object {
-    # On utilise -ErrorAction SilentlyContinue car certains chemins peuvent être inaccessibles
     Get-ChildItem $_ -ErrorAction SilentlyContinue | ForEach-Object {
         $Key = $_
         
-        # Tentative de récupération de la taille estimée (en Mo)
+        # Taille
         $TailleMo = $Key.GetValue("EstimatedSize")
-        if ($TailleMo) {
-            # EstimatedSize est généralement en KB, on convertit en Mo
-            $TailleMo = [math]::Round($TailleMo / 1024, 2)
-        } else {
-            $TailleMo = 0
+        if ($TailleMo) { $TailleMo = [math]::Round($TailleMo / 1024, 2) } else { $TailleMo = 0 }
+        
+        # Date (Conversion sécurisée pour PS 5.1)
+        $InstallDateRaw = $Key.GetValue("InstallDate")
+        $InstallDate = [datetime]::MinValue
+        if ($InstallDateRaw -and $InstallDateRaw -match '^\d{8}$') {
+            try {
+                $InstallDate = [datetime]::ParseExact($InstallDateRaw, 'yyyyMMdd', [System.Globalization.CultureInfo]::InvariantCulture)
+            } catch {}
         }
         
-        # Récupération de la date d'installation
-        $InstallDate = $Key.GetValue("InstallDate")
-        if ($InstallDate -and $InstallDate -match '^\d{8}$') {
-            # Le format est souvent YYYYMMDD
-            # Utilisation de la méthode TryParseExact pour plus de robustesse
-            if ([datetime]::TryParseExact($InstallDate, 'yyyyMMdd', $null, [System.Globalization.DateTimeStyles]::None, [ref]$DateObj)) {
-                $InstallDate = $DateObj
-            } else {
-                $InstallDate = [datetime]::MinValue
-            }
-        } else {
-            $InstallDate = [datetime]::MinValue
-        }
-        
-        # Création de l'objet personnalisé avec toutes les infos nécessaires
         [PSCustomObject]@{
             Nom             = $Key.GetValue("DisplayName")
             Version         = $Key.GetValue("DisplayVersion")
@@ -42,172 +31,144 @@ $Programmes = $paths | ForEach-Object {
     }
 } | Where-Object { $_.Nom }
 
-# --- 2. Configuration du Menu Interactif ---
-$IndexSelection = 0 # L'index du programme actuellement sélectionné
-$ProprieteTri = "Nom" # Propriété de tri par défaut
-$OrdreTri = $true # $true = Ascendant (A-Z, Petit->Grand, Ancien->Récent), $false = Descendant
+# --- 2. Configuration du Menu ---
+$IndexSelection = 0 
+$ProprieteTri = "Nom" 
+$OrdreTri = $true 
 
-# Constantes ANSI pour le surlignage (REVERTED ANSI)
-# \e[7m active l'inversion des couleurs (Reverted/Reverse)
-# \e[0m réinitialise les attributs
-$HighlightOn = "`e[7m"
-$HighlightOff = "`e[0m"
+# Fonction utilitaire pour couper le texte trop long (pour garder les colonnes droites)
+function Tronquer-Texte {
+    param ($Texte, $LongueurMax)
+    if ([string]::IsNullOrEmpty($Texte)) { return " ".PadRight($LongueurMax) }
+    if ($Texte.Length -gt $LongueurMax) {
+        return $Texte.Substring(0, $LongueurMax-3) + "..."
+    }
+    return $Texte.PadRight($LongueurMax)
+}
 
-# Fonction pour dessiner le menu
 function DessinerMenu {
     param(
         [Parameter(Mandatory=$true)]$ListeProgrammes,
         [Parameter(Mandatory=$true)]$Index
     )
     
-    # Effacer l'écran pour redessiner le menu (amélioration de la clarté)
     Clear-Host
 
-    # Affichage des informations de tri
-    $TriInfo = switch ($ProprieteTri) {
-        "Nom" { "Nom (`e[1mN`e[0m)" }
-        "TailleMo" { "Taille (`e[1mT`e[0m)" }
-        "DateInstallation" { "Date (`e[1mD`e[0m)" }
-    }
-    $OrdreInfo = if ($OrdreTri) { "Ascendant" } else { "Descendant" }
+    # Info Tri
+    $NomTri = switch ($ProprieteTri) { "Nom" {"NOM"} "TailleMo" {"TAILLE"} "DateInstallation" {"DATE"} }
+    $SensTri = if ($OrdreTri) { "A-Z (Asc)" } else { "Z-A (Desc)" }
     
-    Write-Host "--- Liste des Programmes Installés ---"
-    Write-Host "Tri actuel: $TriInfo - $OrdreInfo"
-    Write-Host "Utilisez les flèches pour naviguer. `e[1mP`e[0m = Ouvrir le Chemin. `e[1mQ`e[0m = Quitter."
-    Write-Host "--------------------------------------"
+    # En-tête
+    Write-Host "--------------------------------------------------------------------------------------" -ForegroundColor DarkGray
+    Write-Host " TRI ACTUEL: $NomTri [$SensTri]" -ForegroundColor Yellow
+    Write-Host " [N]=Tri Nom  [T]=Tri Taille  [D]=Tri Date  [P]=Ouvrir Dossier  [Q]=Quitter" -ForegroundColor Cyan
+    Write-Host "--------------------------------------------------------------------------------------" -ForegroundColor DarkGray
     
-    # Affichage de l'en-tête (manuellement pour l'alignement)
-    $HeaderNom = "Nom du Programme".PadRight(50)
-    $HeaderVersion = "Version".PadRight(15)
-    $HeaderTaille = "Taille (Mo)".PadRight(10)
-    $HeaderDate = "Date d'Install.".PadRight(15)
-    Write-Host "$HeaderNom $HeaderVersion $HeaderTaille $HeaderDate"
+    # Titres des colonnes (Largeurs fixes : 50, 20, 10, 12)
+    # {0,-50} signifie : aligné à gauche, prend 50 espaces
+    $FormatHeader = "{0,-50} {1,-20} {2,10} {3,12}"
+    $Header = $FormatHeader -f "NOM DU PROGRAMME", "VERSION", "TAILLE(Mo)", "DATE"
+    Write-Host $Header -ForegroundColor Gray
 
-    # Affichage de la liste des programmes
-    for ($i = 0; $i -lt $ListeProgrammes.Count; $i++) {
-        $LigneProgramme = $ListeProgrammes[$i]
+    # Calcul de la plage à afficher (pour éviter de saturer la console si 500 programmes)
+    # On affiche une "fenêtre" autour de la sélection si nécessaire, sinon tout.
+    # Ici, on affiche tout pour rester simple, mais on formate proprement.
+    
+    $i = 0
+    foreach ($Prog in $ListeProgrammes) {
         
-        # Formatage des colonnes avec PadRight pour alignement
-        $Nom = ($LigneProgramme.Nom).PadRight(50)
-        $Version = ($LigneProgramme.Version).PadRight(15)
-        $Taille = ($LigneProgramme.TailleMo -as [string]).PadRight(10)
+        # 1. Préparation des données pour l'affichage (Troncature)
+        $Aff_Nom = Tronquer-Texte -Texte $Prog.Nom -LongueurMax 50
+        $Aff_Ver = Tronquer-Texte -Texte $Prog.Version -LongueurMax 20
         
-        # --- CORRECTION DE L'ERREUR DE SURCHARGE ICI ---
-        # 1. On vérifie d'abord si la date n'est pas la valeur minimale (ce qui signifie N/A)
-        if ($LigneProgramme.DateInstallation -ne [datetime]::MinValue) { 
-            # 2. On caste la valeur en [datetime] pour s'assurer que la méthode ToString(string) est disponible
-            $Date = ([datetime]$LigneProgramme.DateInstallation).ToString("yyyy-MM-dd") 
+        # Taille alignée à droite
+        if ($Prog.TailleMo -gt 0) { $Aff_Taille = "{0,10:N2}" -f $Prog.TailleMo } 
+        else { $Aff_Taille = "      -   " }
+
+        # Date
+        if ($Prog.DateInstallation -ne [datetime]::MinValue) { 
+            $Aff_Date = "{0,12:yyyy-MM-dd}" -f $Prog.DateInstallation 
         } else { 
-            $Date = "N/A" 
+            $Aff_Date = "           -" 
         }
-        # ------------------------------------------------
-        
-        $Date = $Date.PadRight(15)
 
-        $LigneAfficher = "$Nom $Version $Taille $Date"
+        # Construction de la ligne
+        $Ligne = "$Aff_Nom $Aff_Ver $Aff_Taille $Aff_Date"
 
+        # 2. Affichage avec surlignage "Natif" (Compatible PS 5.1)
         if ($i -eq $Index) {
-            # Afficher la ligne sélectionnée avec l'inversion ANSI
-            Write-Host "$HighlightOn$LigneAfficher$HighlightOff"
+            # Ligne sélectionnée : Fond Blanc, Texte Noir (ou Cyan sombre selon préférence)
+            Write-Host $Ligne -BackgroundColor Gray -ForegroundColor Black
         } else {
-            # Afficher les autres lignes normalement
-            Write-Host $LigneAfficher
+            # Ligne normale
+            Write-Host $Ligne
         }
+        $i++
     }
 }
 
-# Fonction pour trier la liste
 function TrierListe {
-    param(
-        [Parameter(Mandatory=$true)]$Programmes
-    )
-
-    # PowerShell trie automatiquement en ascendant si $OrdreTri est vrai
-    if ($OrdreTri) {
-        return $Programmes | Sort-Object $ProprieteTri
-    } else {
-        return $Programmes | Sort-Object $ProprieteTri -Descending
-    }
+    param($Programmes)
+    if ($OrdreTri) { return $Programmes | Sort-Object $ProprieteTri }
+    else { return $Programmes | Sort-Object $ProprieteTri -Descending }
 }
 
-# Tri initial
+# --- 3. Boucle Principale ---
 $ProgrammesTries = TrierListe -Programmes $Programmes
-
-# --- 3. Boucle principale du Menu ---
-DessinerMenu -ListeProgrammes $ProgrammesTries -Index $IndexSelection
+$NeedsRefresh = $true
 
 while ($true) {
-    # Lecture d'une touche du clavier sans afficher le caractère
+    if ($NeedsRefresh) {
+        DessinerMenu -ListeProgrammes $ProgrammesTries -Index $IndexSelection
+        $NeedsRefresh = $false
+    }
+
     $Cle = $host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
 
-    # Gestion des touches de navigation (Haut, Bas)
-    if ($Cle.VirtualKeyCode -eq 38) { # Haut (Up Arrow)
+    # Navigation
+    if ($Cle.VirtualKeyCode -eq 38) { # Haut
         $IndexSelection--
-    } elseif ($Cle.VirtualKeyCode -eq 40) { # Bas (Down Arrow)
+        if ($IndexSelection -lt 0) { $IndexSelection = $ProgrammesTries.Count - 1 }
+        $NeedsRefresh = $true
+    }
+    elseif ($Cle.VirtualKeyCode -eq 40) { # Bas
         $IndexSelection++
+        if ($IndexSelection -ge $ProgrammesTries.Count) { $IndexSelection = 0 }
+        $NeedsRefresh = $true
     }
     
-    # S'assurer que l'index reste dans les limites de la liste
-    if ($IndexSelection -lt 0) {
-        $IndexSelection = $ProgrammesTries.Count - 1
-    } elseif ($IndexSelection -ge $ProgrammesTries.Count) {
-        $IndexSelection = 0
-    }
-
-    # Gestion des touches de tri (N, T, D)
-    $CleChar = $Cle.Character.ToString().ToUpper()
-    $RedrawNeeded = $false
+    # Commandes
+    $Char = $Cle.Character.ToString().ToUpper()
     
-    switch ($CleChar) {
-        "N" { # Nom
-            if ($ProprieteTri -eq "Nom") { $OrdreTri = -not $OrdreTri }
-            else { $ProprieteTri = "Nom"; $OrdreTri = $true }
-            $ProgrammesTries = TrierListe -Programmes $Programmes
-            $RedrawNeeded = $true
-        }
-        "T" { # Taille
-            if ($ProprieteTri -eq "TailleMo") { $OrdreTri = -not $OrdreTri }
-            else { $ProprieteTri = "TailleMo"; $OrdreTri = $false } # On met Descendant par défaut pour la taille
-            $ProgrammesTries = TrierListe -Programmes $Programmes
-            $RedrawNeeded = $true
-        }
-        "D" { # Date d'installation
-            if ($ProprieteTri -eq "DateInstallation") { $OrdreTri = -not $OrdreTri }
-            else { $ProprieteTri = "DateInstallation"; $OrdreTri = $false } # On met Descendant par défaut pour la date
-            $ProgrammesTries = TrierListe -Programmes $Programmes
-            $RedrawNeeded = $true
-        }
-        "P" { # Ouvrir le chemin d'accès
-            $ProgrammeSelectionne = $ProgrammesTries[$IndexSelection]
-            $Chemin = $ProgrammeSelectionne.Chemin
-
-            Clear-Host
-            Write-Host "--- Ouverture du Chemin ---"
-            Write-Host "Programme : $($ProgrammeSelectionne.Nom)"
-            
-            if ($Chemin -and (Test-Path -Path $Chemin -PathType Container)) {
-                Write-Host "Chemin : $Chemin" -ForegroundColor Green
-                # Utilisation de Start-Process pour ouvrir l'explorateur
-                Start-Process -FilePath $Chemin
-                Write-Host "`nAppuyez sur une touche pour retourner au menu..."
-                $null = $host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-                $RedrawNeeded = $true
-            } else {
-                Write-Host "Chemin non trouvé ou non spécifié pour ce programme." -ForegroundColor Red
-                if ($Chemin) { Write-Host "(Chemin enregistré : $Chemin)" }
-                Write-Host "`nAppuyez sur une touche pour retourner au menu..."
-                $null = $host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-                $RedrawNeeded = $true
-            }
-        }
-        "Q" { # Quitter
-            Clear-Host
-            return # Sortir de la fonction et du script
-        }
+    if ($Char -eq "N") {
+        if ($ProprieteTri -eq "Nom") { $OrdreTri = -not $OrdreTri } 
+        else { $ProprieteTri = "Nom"; $OrdreTri = $true }
+        $ProgrammesTries = TrierListe -Programmes $Programmes
+        $NeedsRefresh = $true
     }
-
-    # Redessiner le menu si un mouvement de flèche ou un tri a eu lieu
-    if ($Cle.VirtualKeyCode -in 38, 40 -or $RedrawNeeded) {
-        DessinerMenu -ListeProgrammes $ProgrammesTries -Index $IndexSelection
+    elseif ($Char -eq "T") {
+        if ($ProprieteTri -eq "TailleMo") { $OrdreTri = -not $OrdreTri } 
+        else { $ProprieteTri = "TailleMo"; $OrdreTri = $false }
+        $ProgrammesTries = TrierListe -Programmes $Programmes
+        $NeedsRefresh = $true
+    }
+    elseif ($Char -eq "D") {
+        if ($ProprieteTri -eq "DateInstallation") { $OrdreTri = -not $OrdreTri } 
+        else { $ProprieteTri = "DateInstallation"; $OrdreTri = $false }
+        $ProgrammesTries = TrierListe -Programmes $Programmes
+        $NeedsRefresh = $true
+    }
+    elseif ($Char -eq "Q") {
+        Clear-Host
+        break
+    }
+    elseif ($Char -eq "P") {
+        $Prog = $ProgrammesTries[$IndexSelection]
+        if ($Prog.Chemin -and (Test-Path $Prog.Chemin)) {
+            Start-Process $Prog.Chemin
+        } else {
+            # Petit flash visuel pour indiquer l'erreur sans casser le menu
+            Write-Host "`a" # Son système (Beep)
+        }
     }
 }
