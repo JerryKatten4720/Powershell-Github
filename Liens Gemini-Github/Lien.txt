@@ -1,0 +1,2 @@
+Gemini : https://gemini.google.com/share/6d5191d06528
+GitHub : https://github.com/JerryKatten4720/Powershell-Github
